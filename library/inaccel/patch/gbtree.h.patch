@@ -1,0 +1,19 @@
+--- xgboost
++++ inaccel-xgboost
+@@ -30,7 +30,7 @@
+ namespace xgboost {
+ enum class TreeMethod : int {
+   kAuto = 0, kApprox = 1, kExact = 2, kHist = 3,
+-  kGPUExact = 4, kGPUHist = 5
++  kGPUExact = 4, kGPUHist = 5, kFPGAExact = 6
+ };
+ 
+ // boosting process types
+@@ -90,6 +90,7 @@
+         .add_enum("hist",      TreeMethod::kHist)
+         .add_enum("gpu_exact", TreeMethod::kGPUExact)
+         .add_enum("gpu_hist",  TreeMethod::kGPUHist)
++        .add_enum("fpga_exact",  TreeMethod::kFPGAExact)
+         .describe("Choice of tree construction method.");
+   }
+ };

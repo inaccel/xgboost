@@ -1,0 +1,12 @@
+--- xgboost
++++ inaccel-xgboost
+@@ -132,6 +132,9 @@
+         tparam_.predictor = "gpu_predictor";
+       }
+       break;
++     case TreeMethod::kFPGAExact:
++      tparam_.updater_seq = "grow_fpga,prune";
++      break;
+     default:
+       LOG(FATAL) << "Unknown tree_method ("
+                  << static_cast<int>(tparam_.tree_method) << ") detected";
