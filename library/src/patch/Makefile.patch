@@ -1,0 +1,14 @@
+file"
+--- xgboost
++++ inaccel-xgboost
+@@ -67,8 +67,8 @@
+ endif
+ endif
+ 
+-export LDFLAGS= -pthread -lm $(ADD_LDFLAGS) $(DMLC_LDFLAGS) $(PLUGIN_LDFLAGS)
+-export CFLAGS= -DDMLC_LOG_CUSTOMIZE=1 -std=c++11 -Wall -Wno-unknown-pragmas -Iinclude $(ADD_CFLAGS) $(PLUGIN_CFLAGS)
++export LDFLAGS= -pthread -lm -L${XILINX_XRT}/lib -lxilinxopencl $(ADD_LDFLAGS) $(DMLC_LDFLAGS) $(PLUGIN_LDFLAGS)
++export CFLAGS= -DDMLC_LOG_CUSTOMIZE=1 -std=c++11 -Wall -Wno-deprecated-declarations -Wno-unknown-pragmas -Iinclude $(ADD_CFLAGS) $(PLUGIN_CFLAGS)
+ CFLAGS += -I$(DMLC_CORE)/include -I$(RABIT)/include -I$(GTEST_PATH)/include
+ #java include path
+ export JAVAINCFLAGS = -I${JAVA_HOME}/include -I./java
