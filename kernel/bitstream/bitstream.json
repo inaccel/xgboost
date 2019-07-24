@@ -112,43 +112,43 @@
                 {
                     "type": "GSP8*",
                     "name": "gpairs",
-                    "memory": ["0"],
+                    "memory": ["1"],
                     "access": "r"
                 },
                 {
                     "type": "NID8*",
                     "name": "node_idxs",
-                    "memory": ["0"],
+                    "memory": ["1"],
                     "access": "r"
                 },
                 {
                     "type": "EntryP8*",
                     "name": "entries",
-                    "memory": ["0"],
+                    "memory": ["1"],
                     "access": "r"
                 },
                 {
                     "type": "bool8*",
                     "name": "fvalid",
-                    "memory": ["0"],
+                    "memory": ["1"],
                     "access": "r"
                 },
                 {
                     "type": "GSP8*",
                     "name": "node_stats",
-                    "memory": ["0"],
+                    "memory": ["1"],
                     "access": "r"
                 },
                 {
                     "type": "float8*",
                     "name": "node_root_gain",
-                    "memory": ["0"],
+                    "memory": ["1"],
                     "access": "r"
                 },
                 {
                     "type": "SplitP2*",
                     "name": "best_splits",
-                    "memory": ["0"],
+                    "memory": ["1"],
                     "access": "w"
                 },
                 {

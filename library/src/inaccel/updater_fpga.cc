@@ -44,32 +44,35 @@ class DistFpgaMaker : public TreeUpdater {
  public:
 	~DistFpgaMaker()
 	{
-		for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+		for(uint32_t req = 0; req<nRequests_; req++)
 		{
-			InAccel::free(world_, dmat_fpga_[kernel]);
-			InAccel::release_engine(engine_[kernel]);
+			InAccel::free(world_, dmat_fpga_[req]);
+			InAccel::release_engine(engine_[req]);
 		}
 		InAccel::release_program(world_);
 		InAccel::release_world(world_);
 	}
-	void Init(const std::vector<std::pair<std::string, std::string> >& args) override {
+	void Configure(const Args& args) override {
 		param_.InitAllowUnknown(args);
 		pruner_.reset(TreeUpdater::Create("prune", tparam_));
-		pruner_->Init(args);
+		pruner_->Configure(args);
 		spliteval_.reset(SplitEvaluator::Create(param_.split_evaluator));
 		spliteval_->Init(args);
 		is_dmat_fpga_initialized_ = false;
-		nkernels_ = 2;
+		nRequests_ = 2;
 		world_ = InAccel::create_world(0);
 
-		InAccel::create_program(world_, std::getenv("BITSTREAM_PATH") );
-		engine_.resize(nkernels_);
+		InAccel::create_program(world_, std::getenv("BITSTREAM") );
+		engine_.resize(nRequests_);
 		// without coral to manage the requests,
-		// the number of kernels must match the actual kernels inside the bitstream
-		// the memory bank should match with the kernel id,
+		// the number of reqs must match the actual reqs inside the bitstream
+		// the memory bank should match with the req id,
 		// i.e. engine_[0] -> bank0, engine_[1] -> bank1
 		engine_[0] = InAccel::create_engine(world_, "xgboost_exact_0" );
 		engine_[1] = InAccel::create_engine(world_, "xgboost_exact_1" );
+	}
+	char const* Name() const override {
+		return "grow_fpga";
 	}
 	void Update(HostDeviceVector<GradientPair> *gpair, DMatrix* dmat,
 				const std::vector<RegTree*> &trees) override {
@@ -79,7 +82,6 @@ class DistFpgaMaker : public TreeUpdater {
 		const auto ncol = static_cast<uint32_t>(dmat->Info().num_col_);
 		if (is_dmat_fpga_initialized_ == false) {
 			monitor_.Start("Init dmat_fpga");
-
 			max_rows_ = 0;
 			for (const auto &batch : dmat->GetSortedColumnBatches()) {
 				for (uint32_t cidx = 0; cidx < ncol; cidx++) {
@@ -89,69 +91,71 @@ class DistFpgaMaker : public TreeUpdater {
 				}
 			}
 			std::vector<std::vector<Entry>> dmat_fpga_tmp;
-			dmat_fpga_tmp.resize(nkernels_);
-			dmat_fpga_.resize(nkernels_);
-			kernel_cols_.resize(nkernels_+1);
-			kernel_cols_[0] = 0;
-			uint32_t ncol_div = ncol/nkernels_;
-			uint32_t ncol_mod = ncol%nkernels_;
+			dmat_fpga_tmp.resize(nRequests_);
+			dmat_fpga_.resize(nRequests_);
+			req_cols_.resize(nRequests_+1);
+			req_cols_[0] = 0;
+			uint32_t ncol_div = ncol/nRequests_;
+			uint32_t ncol_mod = ncol%nRequests_;
 			auto nrow_mlt = max_rows_*8;
 			Entry invalid;
 			invalid.fvalue = 0;
 			invalid.index = -1;
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++) {
-				kernel_cols_[kernel+1] = kernel_cols_[kernel] + ncol_div + ((ncol_mod>0)?1:0);
+			for(uint32_t req = 0; req<nRequests_; req++) {
+				req_cols_[req+1] = req_cols_[req] + ncol_div + ((ncol_mod>0)?1:0);
 				ncol_mod-=((ncol_mod>0)?1:0);
-				auto ncol_kernel = kernel_cols_[kernel+1] - kernel_cols_[kernel];
-				auto ncol_mlt = ncol_kernel/8 + ((ncol_kernel%8)>0?1:0);
-				dmat_fpga_tmp[kernel].resize(nrow_mlt*ncol_mlt);
-				std::fill(dmat_fpga_tmp[kernel].begin(),dmat_fpga_tmp[kernel].end(),invalid);
+				auto ncol_req = req_cols_[req+1] - req_cols_[req];
+				auto ncol_mlt = ncol_req/8 + ((ncol_req%8)>0?1:0);
+				dmat_fpga_tmp[req].resize(ncol_mlt*nrow_mlt);
+				std::fill(dmat_fpga_tmp[req].begin(),dmat_fpga_tmp[req].end(),invalid);
 				for (const auto &batch : dmat->GetSortedColumnBatches()) {
 					#pragma omp parallel for schedule(static)
-					for (uint32_t cidx = kernel_cols_[kernel]; cidx < kernel_cols_[kernel+1]; cidx++) {
+					for (uint32_t cidx = req_cols_[req]; cidx < req_cols_[req+1]; cidx++) {
 						auto col = batch[cidx];
-						auto rblock_idx = (cidx-kernel_cols_[kernel])%8;
-						auto ncidx = (cidx-kernel_cols_[kernel])/8;
+						auto rblock_idx = (cidx-req_cols_[req])%8;
+						auto ncidx = (cidx-req_cols_[req])/8;
 						const auto ndata = static_cast<uint32_t>(col.size());
 						for (uint32_t ridx = 0; ridx < ndata; ridx++) {
 							const Entry e = col[ridx];
 							auto rblock = ridx*8;
-							dmat_fpga_tmp[kernel][ncidx*nrow_mlt + rblock + rblock_idx] = e;
+							dmat_fpga_tmp[req][ncidx*nrow_mlt + rblock + rblock_idx] = e;
 						}
 					}
 				}
-				dmat_fpga_[kernel] = InAccel::malloc(world_, dmat_fpga_tmp[kernel].size()*sizeof(Entry), kernel);
-				InAccel::memcpy_to(world_, dmat_fpga_[kernel], 0, dmat_fpga_tmp[kernel].data(),
-								   dmat_fpga_tmp[kernel].size()*sizeof(Entry));				
+			}
+			for(uint32_t req = 0; req<nRequests_; req++) {
+				dmat_fpga_[req] = InAccel::malloc(world_, dmat_fpga_tmp[req].size()*sizeof(Entry), req);
+				InAccel::memcpy_to(world_, dmat_fpga_[req], 0, dmat_fpga_tmp[req].data(),
+								   dmat_fpga_tmp[req].size()*sizeof(Entry));
 			}
 			is_dmat_fpga_initialized_ = true;
 			monitor_.Stop("Init dmat_fpga");
 		}
-		Builder builder( nrow, ncol, max_rows_, nkernels_, param_, monitor_, world_, engine_,
+		Builder builder( nrow, ncol, max_rows_, nRequests_, param_, monitor_, world_, engine_,
 						 std::unique_ptr<SplitEvaluator>(spliteval_->GetHostClone()));
 		monitor_.Start("Init gpair_fpga");
 		std::vector<GradientPair>& gpair_h = gpair->HostVector();
 		size_t gpair_fpga_size = gpair_h.size() + (((gpair_h.size()%8)>0)?(8 - (gpair_h.size()%8)):0);
-		gpair_fpga_.resize(nkernels_);
-		for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+		gpair_fpga_.resize(nRequests_);
+		for(uint32_t req = 0; req<nRequests_; req++)
 		{
-			gpair_fpga_[kernel] = InAccel::malloc(world_, gpair_fpga_size*sizeof(GradientPair), kernel);
-			InAccel::memcpy_to(world_, gpair_fpga_[kernel], 0, gpair_h.data(), gpair_h.size()*sizeof(GradientPair));	
+			gpair_fpga_[req] = InAccel::malloc(world_, gpair_fpga_size*sizeof(GradientPair), req);
+			InAccel::memcpy_to(world_, gpair_fpga_[req], 0, gpair_h.data(), gpair_h.size()*sizeof(GradientPair));
 		}
 		monitor_.Stop("Init gpair_fpga");
 		monitor_.Start("builder Update");
-		builder.Update( gpair->ConstHostVector(), gpair_fpga_, dmat, dmat_fpga_, kernel_cols_, trees[0]);
+		builder.Update( gpair->ConstHostVector(), gpair_fpga_, dmat, dmat_fpga_, req_cols_, trees[0]);
 		monitor_.Stop("builder Update");
 		monitor_.Start("pruner Update");
 		pruner_->Update(gpair, dmat, trees);
 		monitor_.Stop("pruner Update");
 		builder.UpdatePosition(dmat, *trees[0]);
-		for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
-			InAccel::free(world_, gpair_fpga_[kernel]);
+		for(uint32_t req = 0; req<nRequests_; req++)
+			InAccel::free(world_, gpair_fpga_[req]);
 	}
  protected:
 	common::Monitor monitor_;
-	unsigned nkernels_;
+	unsigned nRequests_;
 	uint32_t max_rows_;
 	cl_world world_;
 	std::vector<cl_engine> engine_;
@@ -161,7 +165,7 @@ class DistFpgaMaker : public TreeUpdater {
 	bool is_dmat_fpga_initialized_;
 	//device buffers
 	std::vector<void*> dmat_fpga_;
-	std::vector<uint32_t> kernel_cols_;
+	std::vector<uint32_t> req_cols_;
 	std::vector<void*> gpair_fpga_;
 	// data structure
 	struct XGBOOST_ALIGNAS(8) GradStatsInAccel {
@@ -287,7 +291,7 @@ class DistFpgaMaker : public TreeUpdater {
 	 	unsigned nrows_;
 	 	unsigned ncols_;
 	 	unsigned max_rows_;
-	 	unsigned nkernels_;
+	 	unsigned nRequests_;
 
 		const TrainParam& param_;
 		common::Monitor& monitor_;
@@ -311,36 +315,36 @@ class DistFpgaMaker : public TreeUpdater {
 		rabit::Reducer<SplitEntryInAccel, SplitEntryInAccel::Reduce> reducer_;
 	 public:
 		// constructor
-		explicit Builder( unsigned nrow, unsigned ncol, unsigned max_rows, unsigned nkernels,
+		explicit Builder( unsigned nrow, unsigned ncol, unsigned max_rows, unsigned nRequests,
 						  const TrainParam& param, common::Monitor& monitor,
 						  const cl_world& world, const std::vector<cl_engine>& engine,
 						  std::unique_ptr<SplitEvaluator> spliteval)
-				: nrows_(nrow), ncols_(ncol), max_rows_(max_rows), nkernels_(nkernels), param_(param),
+				: nrows_(nrow), ncols_(ncol), max_rows_(max_rows), nRequests_(nRequests), param_(param),
 				  monitor_(monitor), world_(world), engine_(engine), nthread_(omp_get_max_threads()),
 				  spliteval_(std::move(spliteval)) {}	  
 		~Builder()
 		{
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				if(position_fpga_[kernel] != 0)
+				if(position_fpga_[req] != 0)
 				{
-					InAccel::free(world_, position_fpga_[kernel]);
-					position_fpga_[kernel] = 0;
+					InAccel::free(world_, position_fpga_[req]);
+					position_fpga_[req] = 0;
 				}
-				if(snode_stats_[kernel] != 0)
+				if(snode_stats_[req] != 0)
 				{
-					InAccel::free(world_, snode_stats_[kernel]);
-					snode_stats_[kernel] = 0;
+					InAccel::free(world_, snode_stats_[req]);
+					snode_stats_[req] = 0;
 				}
-				if(snode_rg_[kernel] != 0)
+				if(snode_rg_[req] != 0)
 				{
-					InAccel::free(world_, snode_rg_[kernel]);
-					snode_rg_[kernel] = 0;
+					InAccel::free(world_, snode_rg_[req]);
+					snode_rg_[req] = 0;
 				}
-				if(feat_valid_fpga_[kernel] != 0)
+				if(feat_valid_fpga_[req] != 0)
 				{
-					InAccel::free(world_, feat_valid_fpga_[kernel]);
-					feat_valid_fpga_[kernel] = 0;
+					InAccel::free(world_, feat_valid_fpga_[req]);
+					feat_valid_fpga_[req] = 0;
 				}
 			}
 		}
@@ -349,7 +353,7 @@ class DistFpgaMaker : public TreeUpdater {
 							const std::vector<void*>& gpair_fpga,
 							DMatrix* p_fmat,
 							const std::vector<void*>& dmat_fpga,
-							const std::vector<uint32_t>& kernel_cols,
+							const std::vector<uint32_t>& req_cols,
 							RegTree* p_tree) {
 			monitor_.Init("Builder");
 			monitor_.Start("Builder Init");
@@ -359,10 +363,10 @@ class DistFpgaMaker : public TreeUpdater {
 			monitor_.Stop("Builder Init");
 			for (int depth = 0; depth < param_.max_depth; ++depth) {
 				monitor_.Start("Builder Create Cubes");
-				this->CreateCubes( depth, *p_tree, kernel_cols);
+				this->CreateCubes( depth, *p_tree, req_cols);
 				monitor_.Stop("Builder Create Cubes");
 				monitor_.Start("Builder Find Splits");
-				this->FindSplit( qexpand_, gpair_fpga, dmat_fpga, kernel_cols, p_tree);
+				this->FindSplit( qexpand_, gpair_fpga, dmat_fpga, req_cols, p_tree);
 				monitor_.Stop("Builder Find Splits");
 				monitor_.Start("Builder Update Tree");
 				this->ResetPosition(qexpand_, p_fmat, *p_tree);
@@ -436,16 +440,16 @@ class DistFpgaMaker : public TreeUpdater {
 			for (int i = 0; i < tree.param.num_roots; ++i) {
 				qexpand_.push_back(i);
 			}
-			feat_valid_fpga_.resize(nkernels_);
-			position_fpga_.resize(nkernels_);
-			snode_stats_.resize(nkernels_);
-			snode_rg_.resize(nkernels_);
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+			feat_valid_fpga_.resize(nRequests_);
+			position_fpga_.resize(nRequests_);
+			snode_stats_.resize(nRequests_);
+			snode_rg_.resize(nRequests_);
+			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				feat_valid_fpga_[kernel] = 0;
-				position_fpga_[kernel] = 0;
-				snode_stats_[kernel] = 0;
-				snode_rg_[kernel] = 0;
+				feat_valid_fpga_[req] = 0;
+				position_fpga_[req] = 0;
+				snode_stats_[req] = 0;
+				snode_rg_[req] = 0;
 			}
 		}
 		inline void InitNewNode(const std::vector<int>& qexpand,
@@ -485,7 +489,7 @@ class DistFpgaMaker : public TreeUpdater {
 						spliteval_->ComputeScore(parentid, nstats, snode_[nid].weight));
 			}
 		}
-		inline void CreateCubes( int depth, const RegTree& tree, const std::vector<uint32_t> &kernel_cols)
+		inline void CreateCubes( int depth, const RegTree& tree, const std::vector<uint32_t> &req_cols)
 		{
 			//node cube creation
 			//create node2workindex vector, which maps new nodes to positions [0,new_nodes_num)
@@ -495,7 +499,7 @@ class DistFpgaMaker : public TreeUpdater {
 				node2workindex_[qexpand_[i]] = static_cast<int>(i);
 			//create position_fpga_ cube with nrow size, that contains the work index of each entry
 			//allign to 32 int16_t (32*2B = 64B)
-			size_t position_fpga_size = position_.size() + (((position_.size()%32)>0)?(32 - (position_.size()%32)):0);
+			size_t position_fpga_size = position_.size() + (((position_.size()%8)>0)?(8 - (position_.size()%8)):0);
 			std::vector<short int> position_fpga_tmp;
 			position_fpga_tmp.resize(position_fpga_size);
 			std::fill(position_fpga_tmp.begin(),position_fpga_tmp.end(),-1);
@@ -507,7 +511,7 @@ class DistFpgaMaker : public TreeUpdater {
 			std::vector<GradStatsInAccel> snode_stats_tmp;
 			snode_stats_tmp.resize(snode_stats_size); //allocate memory to create cube
 			//allign to 16 floats (16*4B = 64B)
-			size_t snode_rg_size = qexpand_.size() + (((qexpand_.size()%16)>0)?(16 - (qexpand_.size()%16)):0);
+			size_t snode_rg_size = qexpand_.size() + (((qexpand_.size()%8)>0)?(8 - (qexpand_.size()%8)):0);
 			std::vector<float> snode_rg_tmp;
 			snode_rg_tmp.resize(snode_rg_size);
 			for (size_t i = 0; i < qexpand_.size(); ++i)
@@ -519,115 +523,115 @@ class DistFpgaMaker : public TreeUpdater {
 			//get valid features
 			auto feat_set = column_sampler_.GetFeatureSet(depth);
 			//create vectors with 1 in each valid feature pos and 0 in each invalid feature pos
-			std::vector<std::vector<short unsigned>> feat_valid_fpga_tmp;
-			feat_valid_fpga_tmp.resize(nkernels_);
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+			std::vector<std::vector<char>> feat_valid_fpga_tmp;
+			feat_valid_fpga_tmp.resize(nRequests_);
+			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				uint32_t nfeatures_kernel = kernel_cols[kernel+1] - kernel_cols[kernel];
-				uint32_t fsize = nfeatures_kernel/8 + ((nfeatures_kernel%8>0)?1:0);
-				feat_valid_fpga_tmp[kernel].resize(fsize);
-				std::fill(feat_valid_fpga_tmp[kernel].begin(),feat_valid_fpga_tmp[kernel].end(),0);
+				uint32_t nfeatures_req = req_cols[req+1] - req_cols[req];
+				uint32_t fsize = nfeatures_req/8 + ((nfeatures_req%8>0)?1:0);
+				feat_valid_fpga_tmp[req].resize(fsize);
+				std::fill(feat_valid_fpga_tmp[req].begin(),feat_valid_fpga_tmp[req].end(),0);
 			}
 			for(uint32_t fid : feat_set->HostVector())
 			{
-				//calculate which kernel this fid belongs to
-				uint32_t kernel = 0;
-				while (fid >= kernel_cols[kernel+1]) kernel++;
-				//shift the fid to this kernel's range
-				uint32_t fid_shifted = fid - kernel_cols[kernel];
+				//calculate which req this fid belongs to
+				uint32_t req = 0;
+				while (fid >= req_cols[req+1]) req++;
+				//shift the fid to this req's range
+				uint32_t fid_shifted = fid - req_cols[req];
 				//calculate which block to access
-				uint32_t block = fid_shifted/16;
+				uint32_t block = fid_shifted/8;
 				//calculate the position inside the block
-				uint32_t block_offset = fid_shifted%16;
-				feat_valid_fpga_tmp[kernel][block] |= (1<<block_offset);
+				uint32_t block_offset = fid_shifted%8;
+				feat_valid_fpga_tmp[req][block] |= (1<<block_offset);
 			}
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				if(position_fpga_[kernel] != 0)
+				if(position_fpga_[req] != 0)
 				{
-					InAccel::free(world_, position_fpga_[kernel]);
-					position_fpga_[kernel] = 0;
+					InAccel::free(world_, position_fpga_[req]);
+					position_fpga_[req] = 0;
 				}
-				position_fpga_[kernel] = InAccel::malloc(world_,
-											position_fpga_tmp.size()*sizeof(short int), kernel);
-				InAccel::memcpy_to(world_, position_fpga_[kernel], 0, position_fpga_tmp.data(),
+				position_fpga_[req] = InAccel::malloc(world_,
+											position_fpga_tmp.size()*sizeof(short int), req);
+				InAccel::memcpy_to(world_, position_fpga_[req], 0, position_fpga_tmp.data(),
 								   position_fpga_tmp.size()*sizeof(short int));
 
-				if(snode_stats_[kernel] != 0)
+				if(snode_stats_[req] != 0)
 				{
-					InAccel::free(world_, snode_stats_[kernel]);
-					snode_stats_[kernel] = 0;
+					InAccel::free(world_, snode_stats_[req]);
+					snode_stats_[req] = 0;
 				}
-				snode_stats_[kernel] = InAccel::malloc(world_,
-											snode_stats_tmp.size()*sizeof(GradStatsInAccel), kernel);
-				InAccel::memcpy_to(world_, snode_stats_[kernel], 0, snode_stats_tmp.data(),
+				snode_stats_[req] = InAccel::malloc(world_,
+											snode_stats_tmp.size()*sizeof(GradStatsInAccel), req);
+				InAccel::memcpy_to(world_, snode_stats_[req], 0, snode_stats_tmp.data(),
 								   snode_stats_tmp.size()*sizeof(GradStatsInAccel));
-				if(snode_rg_[kernel] != 0)
+
+				if(snode_rg_[req] != 0)
 				{
-					InAccel::free(world_, snode_rg_[kernel]);
-					snode_rg_[kernel] = 0;
+					InAccel::free(world_, snode_rg_[req]);
+					snode_rg_[req] = 0;
 				}
-				snode_rg_[kernel] = InAccel::malloc(world_, snode_rg_tmp.size()*sizeof(float), kernel);
-				InAccel::memcpy_to(world_, snode_rg_[kernel], 0, snode_rg_tmp.data(),
+				snode_rg_[req] = InAccel::malloc(world_, snode_rg_tmp.size()*sizeof(float), req);
+				InAccel::memcpy_to(world_, snode_rg_[req], 0, snode_rg_tmp.data(),
 								   snode_rg_tmp.size()*sizeof(float));
 
-				if(feat_valid_fpga_[kernel] != 0)
+				if(feat_valid_fpga_[req] != 0)
 				{
-					InAccel::free(world_, feat_valid_fpga_[kernel]);
-					feat_valid_fpga_[kernel] = 0;
+					InAccel::free(world_, feat_valid_fpga_[req]);
+					feat_valid_fpga_[req] = 0;
 				}
-				feat_valid_fpga_[kernel] = InAccel::malloc(world_,
-										feat_valid_fpga_tmp[kernel].size()*sizeof(short unsigned), kernel);
-				InAccel::memcpy_to(world_, feat_valid_fpga_[kernel], 0, feat_valid_fpga_tmp.data(),
-								   feat_valid_fpga_tmp.size()*sizeof(short unsigned));
+				feat_valid_fpga_[req] = InAccel::malloc(world_,
+										feat_valid_fpga_tmp[req].size()*sizeof(char), req);
+				InAccel::memcpy_to(world_, feat_valid_fpga_[req], 0, feat_valid_fpga_tmp[req].data(),
+								   feat_valid_fpga_tmp[req].size()*sizeof(char));
 			}
 		}
 		inline void FindSplit(  const std::vector<int> &qexpand,
 								const std::vector<void*>& gpair_fpga,
 								const std::vector<void*>& dmat_fpga,
-								const std::vector<uint32_t>& kernel_cols,
+								const std::vector<uint32_t>& req_cols,
 								RegTree *p_tree) {
 			size_t qexpand_size_alligned = qexpand.size() + (qexpand.size()%2);
+			CHECK_LE(qexpand.size(),2048) << 
+				"More than 2048 new nodes were requested. Please reduce max depth";
 			std::vector<std::vector<SplitEntryInAccelRet>> best_split_tmp;
-			best_split_tmp.resize(nkernels_);
+			best_split_tmp.resize(nRequests_);
 			std::vector<void*> best_split;
-			best_split.resize(nkernels_);
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+			best_split.resize(nRequests_);
+			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				best_split_tmp[kernel].resize(qexpand_size_alligned);
-				uint32_t ncols_kernel = kernel_cols[kernel+1] - kernel_cols[kernel];
-				best_split[kernel] = InAccel::malloc(world_,
-								best_split_tmp[kernel].size()*sizeof(SplitEntryInAccelRet), kernel);
-
-				InAccel::set_engine_arg(engine_[kernel],0, (int)nrows_);//real entry num -> nrows_
-				InAccel::set_engine_arg(engine_[kernel],1, (int)ncols_kernel);//feature_num -> ncols_
-				InAccel::set_engine_arg(engine_[kernel],2, (int)qexpand.size()); //node num
-				InAccel::set_engine_arg(engine_[kernel],3, (int)max_rows_); //node num
-				InAccel::set_engine_arg(engine_[kernel],4, gpair_fpga[kernel]);
-				InAccel::set_engine_arg(engine_[kernel],5, position_fpga_[kernel]);
-				InAccel::set_engine_arg(engine_[kernel],6, dmat_fpga[kernel]);
-				InAccel::set_engine_arg(engine_[kernel],7, feat_valid_fpga_[kernel]);
-				InAccel::set_engine_arg(engine_[kernel],8, snode_stats_[kernel]);
-				InAccel::set_engine_arg(engine_[kernel],9, snode_rg_[kernel]);
-				InAccel::set_engine_arg(engine_[kernel],10, best_split[kernel]);
-				InAccel::set_engine_arg(engine_[kernel],11, param_.min_child_weight);
-				InAccel::set_engine_arg(engine_[kernel],12, param_.max_delta_step);
-				InAccel::set_engine_arg(engine_[kernel],13, param_.reg_alpha);
-				InAccel::set_engine_arg(engine_[kernel],14, param_.reg_lambda);
+				best_split_tmp[req].resize(qexpand_size_alligned);
+				uint32_t ncols_req = req_cols[req+1] - req_cols[req];
+				best_split[req] = InAccel::malloc(world_,
+								best_split_tmp[req].size()*sizeof(SplitEntryInAccelRet), req);
+				InAccel::set_engine_arg(engine_[req],0, (int)nrows_);//real entry num -> nrows_
+				InAccel::set_engine_arg(engine_[req],1, (int)ncols_req);//feature_num -> ncols_
+				InAccel::set_engine_arg(engine_[req],2, (int)qexpand.size()); //node num
+				InAccel::set_engine_arg(engine_[req],3, (int)max_rows_); //node num
+				InAccel::set_engine_arg(engine_[req],4, gpair_fpga[req]);
+				InAccel::set_engine_arg(engine_[req],5, position_fpga_[req]);
+				InAccel::set_engine_arg(engine_[req],6, dmat_fpga[req]);
+				InAccel::set_engine_arg(engine_[req],7, feat_valid_fpga_[req]);
+				InAccel::set_engine_arg(engine_[req],8, snode_stats_[req]);
+				InAccel::set_engine_arg(engine_[req],9, snode_rg_[req]);
+				InAccel::set_engine_arg(engine_[req],10, best_split[req]);
+				InAccel::set_engine_arg(engine_[req],11, param_.min_child_weight);
+				InAccel::set_engine_arg(engine_[req],12, param_.max_delta_step);
+				InAccel::set_engine_arg(engine_[req],13, param_.reg_alpha);
+				InAccel::set_engine_arg(engine_[req],14, param_.reg_lambda);
 			}
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
-				InAccel::run_engine(engine_[kernel]);
-
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
-				InAccel::await_engine(engine_[kernel]);
-
-			for(uint32_t kernel = 0; kernel<nkernels_; kernel++)
+			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				InAccel::memcpy_from(world_, best_split[kernel], 0, best_split_tmp[kernel].data(),
-									 best_split_tmp[kernel].size()*sizeof(SplitEntryInAccelRet));
+				InAccel::run_engine(engine_[req]);
 			}
-
-			this->SyncBestSolution(qexpand, best_split_tmp, kernel_cols);
+			for(uint32_t req = 0; req<nRequests_; req++)
+			{
+				InAccel::await_engine(engine_[req]);
+				InAccel::memcpy_from(world_, best_split[req], 0, best_split_tmp[req].data(),
+									 best_split_tmp[req].size()*sizeof(SplitEntryInAccelRet));
+			}
+			this->SyncBestSolution(qexpand, best_split_tmp, req_cols);
 			for (int nid : qexpand) {
 				NodeEntryInAccel &e = snode_[nid];
 				if (e.best.loss_chg > kRtEps) {
@@ -648,13 +652,13 @@ class DistFpgaMaker : public TreeUpdater {
 		}
 		void SyncBestSolution(const std::vector<int> &qexpand,
 							  const std::vector<std::vector<SplitEntryInAccelRet>> &best_split,
-							  const std::vector<uint32_t>& kernel_cols) {
+							  const std::vector<uint32_t>& req_cols) {
 			std::vector<SplitEntryInAccel> vec;
 			for (int nid : qexpand) {
-				for (uint32_t kernel = 0; kernel < nkernels_; kernel++) {
+				for (uint32_t req = 0; req < nRequests_; req++) {
 					this->snode_[nid].best.Update( SplitEntryInAccel(this->snode_[nid].stats,
-													 best_split[kernel][node2workindex_[nid]],
-													 kernel_cols[kernel]));
+													 best_split[req][node2workindex_[nid]],
+													 req_cols[req]));
 				}
 				vec.push_back(this->snode_[nid].best);
 			}

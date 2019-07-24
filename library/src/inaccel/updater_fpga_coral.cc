@@ -43,16 +43,19 @@ DMLC_REGISTRY_FILE_TAG(updater_fpga_coral);
 // distributed column maker
 class DistFpgaMaker : public TreeUpdater {
  public:
-	void Init(const std::vector<std::pair<std::string, std::string> >& args) override {
+	void Configure(const Args& args) override {
 		param_.InitAllowUnknown(args);
 		pruner_.reset(TreeUpdater::Create("prune", tparam_));
-		pruner_->Init(args);
+		pruner_->Configure(args);
 		spliteval_.reset(SplitEvaluator::Create(param_.split_evaluator));
 		spliteval_->Init(args);
 		is_dmat_fpga_initialized_ = false;
-		nRequests_ = 1;
+		nRequests_ = 2;
 		for(auto p : args)
 			if(p.first == "nRequests") nRequests_ = std::stoi(p.second);
+	}
+	char const* Name() const override {
+		return "grow_fpga";
 	}
 	void Update(HostDeviceVector<GradientPair> *gpair, DMatrix* dmat,
 				const std::vector<RegTree*> &trees) override {
@@ -71,8 +74,8 @@ class DistFpgaMaker : public TreeUpdater {
 				}
 			}
 			dmat_fpga_.resize(nRequests_);
-			req_cols.resize(nRequests_+1);
-			req_cols[0] = 0;
+			req_cols_.resize(nRequests_+1);
+			req_cols_[0] = 0;
 			uint32_t ncol_div = ncol/nRequests_;
 			uint32_t ncol_mod = ncol%nRequests_;
 			auto nrow_mlt = max_rows_*8;
@@ -80,18 +83,18 @@ class DistFpgaMaker : public TreeUpdater {
 			invalid.fvalue = 0;
 			invalid.index = -1;
 			for(uint32_t req = 0; req<nRequests_; req++) {
-				req_cols[req+1] = req_cols[req] + ncol_div + ((ncol_mod>0)?1:0);
+				req_cols_[req+1] = req_cols_[req] + ncol_div + ((ncol_mod>0)?1:0);
 				ncol_mod-=((ncol_mod>0)?1:0);
-				auto ncol_req = req_cols[req+1] - req_cols[req];
+				auto ncol_req = req_cols_[req+1] - req_cols_[req];
 				auto ncol_mlt = ncol_req/8 + ((ncol_req%8)>0?1:0);
 				dmat_fpga_[req].resize(ncol_mlt*nrow_mlt);
 				std::fill(dmat_fpga_[req].begin(),dmat_fpga_[req].end(),invalid);
 				for (const auto &batch : dmat->GetSortedColumnBatches()) {
 					#pragma omp parallel for schedule(static)
-					for (uint32_t cidx = req_cols[req]; cidx < req_cols[req+1]; cidx++) {
+					for (uint32_t cidx = req_cols_[req]; cidx < req_cols_[req+1]; cidx++) {
 						auto col = batch[cidx];
-						auto rblock_idx = (cidx-req_cols[req])%8;
-						auto ncidx = (cidx-req_cols[req])/8;
+						auto rblock_idx = (cidx-req_cols_[req])%8;
+						auto ncidx = (cidx-req_cols_[req])/8;
 						const auto ndata = static_cast<uint32_t>(col.size());
 						for (uint32_t ridx = 0; ridx < ndata; ridx++) {
 							const Entry e = col[ridx];
@@ -115,7 +118,7 @@ class DistFpgaMaker : public TreeUpdater {
 		gpair_fpga_.assign(gpair_h.begin(),gpair_h.end());
 		monitor_.Stop("Init gpair_fpga");
 		monitor_.Start("builder Update");
-		builder.Update(gpair->ConstHostVector(), gpair_fpga_, dmat, dmat_fpga_, req_cols, trees[0]);
+		builder.Update(gpair->ConstHostVector(), gpair_fpga_, dmat, dmat_fpga_, req_cols_, trees[0]);
 		monitor_.Stop("builder Update");
 		monitor_.Start("pruner Update");
 		pruner_->Update(gpair, dmat, trees);
@@ -132,7 +135,7 @@ class DistFpgaMaker : public TreeUpdater {
 	bool is_dmat_fpga_initialized_;
 	//cubes
 	std::vector<::inaccel::vector<Entry>> dmat_fpga_;
-	std::vector<uint32_t> req_cols;
+	std::vector<uint32_t> req_cols_;
 	::inaccel::vector<GradientPair> gpair_fpga_;
 	// data structure
 	struct XGBOOST_ALIGNAS(8) GradStatsInAccel {
@@ -270,7 +273,7 @@ class DistFpgaMaker : public TreeUpdater {
 		std::vector<NodeEntryInAccel> snode_;
 		::inaccel::vector<GradStatsInAccel> snode_stats_;
 		::inaccel::vector<float> snode_rg_;
-		std::vector<::inaccel::vector<short unsigned>> feat_valid_fpga_;
+		std::vector<::inaccel::vector<char>> feat_valid_fpga_;
 		std::vector<int> qexpand_;
 		std::vector<int> node2workindex_;
 		std::unique_ptr<SplitEvaluator> spliteval_;
@@ -470,9 +473,9 @@ class DistFpgaMaker : public TreeUpdater {
 				//shift the fid to this req's range
 				uint32_t fid_shifted = fid - req_cols[req];
 				//calculate which block to access
-				uint32_t block = fid_shifted/16;
+				uint32_t block = fid_shifted/8;
 				//calculate the position inside the block
-				uint32_t block_offset = fid_shifted%16;
+				uint32_t block_offset = fid_shifted%8;
 				feat_valid_fpga_[req][block] |= (1<<block_offset);
 			}
 		}
@@ -482,6 +485,8 @@ class DistFpgaMaker : public TreeUpdater {
 								const std::vector<uint32_t> &req_cols,
 								RegTree *p_tree) {
 			size_t qexpand_size_alligned = qexpand.size() + (qexpand.size()%2);
+			CHECK_LE(qexpand.size(),2048) << 
+				"More than 2048 new nodes were requested. Please reduce max depth";
 			std::vector<::inaccel::vector<SplitEntryInAccelRet>> best_split;
 			std::vector<::inaccel::Request> requests;
 			best_split.resize(nRequests_);
@@ -489,7 +494,7 @@ class DistFpgaMaker : public TreeUpdater {
 			{
 				best_split[req].resize(qexpand_size_alligned);
 				uint32_t ncols_req = req_cols[req+1] - req_cols[req];
-				::inaccel::Request request{"com.xgboost.inaccel.exact.exact"};
+				::inaccel::Request request{"com.inaccel.xgboost.exact"};
 				request.Arg((int)nrows_);
 				request.Arg((int)ncols_req);
 				request.Arg((int)qexpand.size());

@@ -10,12 +10,20 @@
 This is an FPGA accelerated solution for the XGBoost algorithm. It can provide up to **30x** speedup compared to a single threaded 
 execution and up to **5x** compared to an 8 threaded Intel Xeon CPU execution respectively.
 
+The acceleration is attained by exposing parallelism and reusing data in the _features_ dimension of the dataset. Due to this, 
+to attain speedup, the dataset should have a large number of features.
+
+Another limitation is that the accelerator needs to read the inputs in dense form, and does not perform well for very sparse datasets,
+since it has to read and skip missing values.
+
 ## Specifications
 
 The IP core that is provided accelerates Split Calculations for the Exact (Greedy) algorithm  for tree creation. A new tree method 
-is also provided in the library, called _fpga\_exact_ that uses our updater and the pruner. To be able to accieve a speedup, some 
+is also provided in the library, called _fpga\_exact_ that uses our updater and the pruner. To be able to achieve a speedup, some 
 limitations were placed. The maximum training sample size is limited to 65536 entries, and the tree depth is also limited. At 
-every tree level, the accelerator can calculate up to 2048 new nodes. That means the theoretical maximum depth is 11. 
+every tree level, the accelerator can calculate up to 2048 new nodes. That means the theoretical maximum depth is 11, but due to pruning, 
+the actual number of nodes to be calculated is reduced. You should set the depth to the value you want and if the training fails with 
+_"More than 2048 new nodes were requested. Please reduce max depth"_, set it to a lower value.
 
 |   Entries   |         Nodes        |
 | :---------: | :------------------: |
@@ -41,6 +49,7 @@ A listing of all the files in this repository is shown below:
 
     - benchmarks/
         - data/
+            - .keep
         - benchmarks.py
         - sdaccel.ini
     - kernel/
@@ -49,8 +58,9 @@ A listing of all the files in this repository is shown below:
             - xgboost_exact_0.cpp
             - xgboost_exact_1.cpp
         - build/
+            - .keep
         - bitstream/
-            -bitstream.json
+            - bitstream.json
     - library/
         - xgboost/
             - XGBoost repository
@@ -128,6 +138,14 @@ This repository contains submodules, so do not forget to execute:
 ``` bash
 git submodule update --init --recursive
 ```
+**!** In case of the following error [click this link](https://github.com/dmlc/xgboost/issues/4684).
+```
+fatal: reference is not a tree: e1c8056f6a0ee1c42fd00430b74176e67db66a9f
+Unable to checkout 'e1c8056f6a0ee1c42fd00430b74176e67db66a9f' in submodule path 'rabit'
+```
+
+
+https://github.com/dmlc/xgboost/issues/4684
 
 In our experience, the XGBoost library fails to build with g++ 4.8.5 (Red Hat default) and g++ 5.3.1 (devtoolset-4), 
 so we used g++ 6.3.1 (devtoolset-6). If you use the Coral version, you can probably use any g++ >= 6. 
@@ -159,12 +177,16 @@ Then build the library with `./build_lib.sh`.
 
 ###  Coral Version
 
-The Coral version uses the InAccel [Coral FPGA resource manager](https://www.inaccel.com/coral-fpga-resource-manager/) to decouple the library and the FPGAs, thus allowing scalability to as many FPGAs as available.
-In this version basic heuristics are performed to find the optimal number of requests (each request is a call to a kernel), which the resource manager schedules to all available FPGAs and kernels.
+The Coral version uses the InAccel [Coral FPGA resource manager](https://www.inaccel.com/coral-fpga-resource-manager/) to decouple 
+the library and the FPGAs, thus allowing scalability to as many FPGAs as available.
+
+In this version you can change the number of requests (each request is a call to a kernel), which will be sent to the 
+resource manager, depending on the number of FPGAs available. The bitstream we provide contains two kernels, 
+so the optimal number of requests should be 2 or 4 depending on the dataset. For more FPGAs, scale it accordingly.
 
 **!** If you have already performed the Standalone patch, reverse it with `./build_lib.sh reverse-standalone`.
 
-The Coral version of the exact updater uses the InAccel Coral-API to comunicate with our FPGA resource manager
+The Coral version of the exact updater uses the InAccel Coral-API to comunicate with our FPGA resource manager.
 
 Install InAccel Coral-API
 ``` bash
@@ -192,46 +214,31 @@ Enter the _benchmarks/_ directory.
 The benchmarks support the following datasets in libsvm format:
 
 * Cifar10
-* MNIST
-* Higgs
-* YearPredictionMSD
-* Cover Type
-* Airline
+* SVHN
 
 Download the datasets you are interrested in:
 
 ``` bash
-#cifar10
+#Cifar10
 wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass/cifar10.bz2
 wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass/cifar10.t.bz2
-#mnist
-wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass/mnist.bz2
-wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass/mnist.t.bz2
-#HIGGS
-wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/HIGGS.bz2
-#YearPredictionMSD
-wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/regression/YearPredictionMSD.bz2
-#Cover Type
-wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/covtype.libsvm.binary.bz2
+#SVHN
+wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass/SVHN.bz2
+wget -P data/ https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/multiclass/SVHN.t.bz2
 ```
+
+For testing purposes, a synthetic regression dataset (SyntheticR) and a synthetic classification dataset (SyntheticCl) are also used.
 
 The Benchmarks are written in Python 3.6, and need the following libraries: numpy, pandas, sklearn.
 
-To have access to Python 3.6, we used the rh-python36 Software Collection:
-
-1.  [Install Python 3.6](https://www.softwarecollections.org/en/scls/rhscl/rh-python36/)
+1.  Install Python 3.6
 ```bash
-sudo yum install centos-release-scl
-sudo yum-config-manager --enable rhel-server-rhscl-7-rpms
-sudo yum install rh-python36
-scl enable rh-python36 "python --version"
+sudo yum install python36 python36-libs python36-devel python36-pip
+python36 --version
 ```
 2.  Install the needed libraries
 ```bash
-sudo scl enable rh-python36 bash
-pip install numpy
-pip install pandas
-pip install sklearn
+sudo pip3.6 install numpy pandas sklearn
 ```
 
 If you want to use the Coral version, to run the benchmarks the **InAccel Coral** FPGA resource manager must be installed and running.
@@ -240,24 +247,23 @@ If you want to use the Coral version, to run the benchmarks the **InAccel Coral*
 * You can **download** InAccel Coral docker from [dockerhub](https://hub.docker.com/r/inaccel/coral).
 * You can find **full documentation** as well as a **quick starting guide** in [InAccel Docs](https://docs.inaccel.com/latest/).
 
-```bash
-scl enable rh-python36 bash
-```
+If you want to use the Standalone version, the updater uses the environmental variable *BITSTREAM* to read the bitstream file. 
+In this version the XGBoost library is dinamically linked to the Xilinx OpenCL library, so you have to source the Xilinx XRT setup script.
+You also usually need to have admin rights to have access to the FPGA.
 
-If you want to use the Standalone version, the updater uses the environmental variable *BITSTREAM_PATH* to read the bitstream file. 
-In this version the XGBoost library is dinamically linked to the Xilinx OpenCL library, so you have to add it to the LD_LIBRARY_PATH.
-You also usually need to have admin rights to have access to the FPGA
 ```bash
-sudo scl enable rh-python36 bash
-export BITSTREAM_PATH=../kernel/bitstream/
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$XILINX_XRT/lib
+sudo su
+source /opt/xilinx/xrt/setup.sh
+export BITSTREAM=../kernel/bitstream/xgboost_exact.hw.awsxclbin
 ```
 
 To run the benchmarks execute:
+
 ```bash
 export PYTHONPATH=../library/xgboost/python-package
-python benchmarks.py
+python36 benchmarks.py
 ```
+
 Benchmark parameters:
 ```bash
 usage: benchmarks.py [-h] [--num_rounds NUM_ROUNDS] [--datasets DATASETS]
@@ -278,46 +284,115 @@ optional arguments:
 ```
 
 ## Example results
-Run on 19 June 2019
+The reported times correspond to the default number of 5 training iterations.
+These measurements were taken on 24 July 2019.
 
 *  Coral Version
 
-| Dataset           | updater | Time(s) | Accuracy |  RMSE  |  SpeedUp |
-|-------------------|---------|---------|----------|--------|----------|
-| Cifar10           |   cpu   | 408.419 |   0.413  |        |          |
-|                   |   fpga  | 88.4338 |  0.4148  |        |  4.61835 |
-| MNIST             |   cpu   | 23.1758 |   0.933  |        |          |
-|                   |   fpga  | 22.0973 |  0.9333  |        |  1.04881 |
-| Higgs             |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| YearPredictionMSD |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| Cover Type        |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| Airline           |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| SyntheticR        |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| SyntheticCl       |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
+Cifar10 and SVHN Datasets with tree depth set to 20
+```bash
+python36 benchmarks.py -d Cifar10,SVHN -D 20
+```
+
+| Dataset | updater | Time(s)     | Accuracy | SpeedUp |
+|---------|---------|-------------|----------|---------|
+| Cifar10 | cpu     |  874.762506 | 0.401200 |         |
+|         | fpga    |  168.310018 | 0.407100 | 5.20    |
+| SVHN    | cpu     | 1051.139699 | 0.595037 |         |
+|         | fpga    |  220.590023 | 0.594077 | 4.77    |
+
+Synthetic Dataset Runs for different feature sizes
+Synthetic Regression
+```bash
+python36 benchmarks.py -d SyntheticR -f 64 128 256 512 1024 2048
+```
+
+| features | updater | Time(s) | RMSE   | SpeedUp |
+|----------|---------|---------|--------|---------|
+|     64   |   cpu   |  1.2496 | 141.20 |         |
+|          |   fpga  |  1.2888 | 191.15 | 0.97    |
+|    128   |   cpu   |  2.8395 |  96.08 |         |
+|          |   fpga  |  1.8535 | 122.48 | 1.53    |
+|    256   |   cpu   |  5.6620 | 142.94 |         |
+|          |   fpga  |  2.8624 | 202.42 | 1.98    |
+|    512   |   cpu   | 10.9949 | 133.82 |         |
+|          |   fpga  |  4.4565 | 183.40 | 2.47    |
+|   1024   |   cpu   | 21.7405 | 136.49 |         |
+|          |   fpga  |  7.6572 | 182.85 | 2.84    |
+|   2048   |   cpu   | 43.6106 | 137.58 |         |
+|          |   fpga  | 14.6405 | 190.68 | 2.98    |
+
+Synthetic Multiclass Classification, 5 classes
+```bash
+python36 benchmarks.py -d SyntheticCl -f 64 128 256 512 1024 2048
+```
+
+| features | updater | Time(s) | Accuracy | SpeedUp |
+|----------|---------|---------|----------|---------|
+|     64   |   cpu   |   5.811 |  0.8589  |         |
+|          |   fpga  |   5.072 |  0.8577  | 1.15    |
+|    128   |   cpu   |  13.491 |  0.8529  |         |
+|          |   fpga  |   6.102 |  0.8523  | 2.21    |
+|    256   |   cpu   |  26.110 |  0.7634  |         |
+|          |   fpga  |   8.869 |  0.7651  | 2.94    |
+|    512   |   cpu   |  50.824 |  0.8068  |         |
+|          |   fpga  |  13.487 |  0.8063  | 3.77    |
+|   1024   |   cpu   | 100.869 |  0.7792  |         |
+|          |   fpga  |  23.264 |  0.7805  | 4.34    |
+|   2048   |   cpu   | 197.331 |  0.8428  |         |
+|          |   fpga  |  42.774 |  0.8418  | 4.61    |
 
 *  Standalone Version
 
-| Dataset           | updater | Time(s) | Accuracy |  RMSE  |  SpeedUp |
-|-------------------|---------|---------|----------|--------|----------|
-| Cifar10           |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| MNIST             |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| Higgs             |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| YearPredictionMSD |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| Cover Type        |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| Airline           |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| SyntheticR        |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
-| SyntheticCl       |   cpu   | 1.00000 |  0.0000  | 0.0000 |          |
-|                   |   fpga  | 1.00000 |  0.0000  | 0.0000 | 1.000000 |
+Cifar10 and SVHN Datasets with tree depth set to 20
+```bash
+python36 benchmarks.py -d Cifar10,SVHN -D 20
+```
+
+| Dataset | updater | Time(s)     | Accuracy | SpeedUp |
+|---------|---------|-------------|----------|---------|
+| Cifar10 | cpu     |  845.308292 | 0.401200 |         |
+|         | fpga    |  164.102713 | 0.407100 | 5.15    |
+| SVHN    | cpu     | 1041.125136 | 0.595037 |         |
+|         | fpga    |  216.056923 | 0.594077 | 4.82    |
+
+Synthetic Dataset Runs for different feature sizes
+Synthetic Regression
+```bash
+python36 benchmarks.py -d SyntheticR -f 64 128 256 512 1024 2048
+```
+
+| features | updater | Time(s) | RMSE   | SpeedUp |
+|----------|---------|---------|--------|---------|
+|     64   |   cpu   |  1.3279 |  92.52 |         |
+|          |   fpga  |  3.3281 | 119.94 | 0.40    |
+|    128   |   cpu   |  2.7711 |  96.08 |         |
+|          |   fpga  |  3.7153 | 122.48 | 0.75    |
+|    256   |   cpu   |  5.5509 | 142.93 |         |
+|          |   fpga  |  4.5977 | 199.48 | 1.21    |
+|    512   |   cpu   | 10.7886 | 133.82 |         |
+|          |   fpga  |  6.1949 | 183.90 | 1.74    |
+|   1024   |   cpu   | 21.4205 | 136.49 |         |
+|          |   fpga  |  9.4584 | 185.55 | 2.26    |
+|   2048   |   cpu   | 42.8734 | 137.58 |         |
+|          |   fpga  | 15.5623 | 191.10 | 2.75    |
+
+Synthetic Multiclass Classification, 5 classes
+```bash
+python36 benchmarks.py -d SyntheticCl -f 64 128 256 512 1024 2048
+```
+
+| features | updater | Time(s) | Accuracy | SpeedUp |
+|----------|---------|---------|----------|---------|
+|     64   |   cpu   |   8.237 |  0.8718  |         |
+|          |   fpga  |   6.100 |  0.8721  | 1.35    |
+|    128   |   cpu   |  14.480 |  0.8359  |         |
+|          |   fpga  |   6.906 |  0.8340  | 2.10    |
+|    256   |   cpu   |  25.519 |  0.8182  |         |
+|          |   fpga  |   9.259 |  0.8174  | 2.76    |
+|    512   |   cpu   |  49.714 |  0.8334  |         |
+|          |   fpga  |  14.115 |  0.8346  | 3.52    |
+|   1024   |   cpu   |  99.051 |  0.8565  |         |
+|          |   fpga  |  23.554 |  0.8572  | 4.21    |
+|   2048   |   cpu   | 196.171 |  0.8518  |         |
+|          |   fpga  |  43.064 |  0.8508  | 4.56    |
