@@ -159,7 +159,7 @@ Then build the library with `./build_lib.sh`.
 
 ###  Coral Version
 
-The Coral version uses the **InAccel Coral** FPGA resource manager to decouple the library and the FPGAs, thus allowing scalability to as many FPGAs as available.
+The Coral version uses the InAccel [Coral FPGA resource manager](https://www.inaccel.com/coral-fpga-resource-manager/) to decouple the library and the FPGAs, thus allowing scalability to as many FPGAs as available.
 In this version basic heuristics are performed to find the optimal number of requests (each request is a call to a kernel), which the resource manager schedules to all available FPGAs and kernels.
 
 **!** If you have already performed the Standalone patch, reverse it with `./build_lib.sh reverse-standalone`.
