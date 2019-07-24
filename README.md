@@ -7,7 +7,7 @@
 # XGBoost Exact Updater IP core
 
 
-This is an FPGA accelerated solution for the XGBoost algorithm. It can provide up to **30x** speedup compared to a single threaded 
+This is an FPGA accelerated solution for the XGBoost algorithm. It can provide up to **26x** speedup compared to a single threaded 
 execution and up to **5x** compared to an 8 threaded Intel Xeon CPU execution respectively.
 
 The acceleration is attained by exposing parallelism and reusing data in the _features_ dimension of the dataset. Due to this, 
@@ -144,9 +144,6 @@ fatal: reference is not a tree: e1c8056f6a0ee1c42fd00430b74176e67db66a9f
 Unable to checkout 'e1c8056f6a0ee1c42fd00430b74176e67db66a9f' in submodule path 'rabit'
 ```
 
-
-https://github.com/dmlc/xgboost/issues/4684
-
 In our experience, the XGBoost library fails to build with g++ 4.8.5 (Red Hat default) and g++ 5.3.1 (devtoolset-4), 
 so we used g++ 6.3.1 (devtoolset-6). If you use the Coral version, you can probably use any g++ >= 6. 
 If you use the non-Coral version you have to use g++ 6.3.1 due to linking with the Xilinx Opencl library (libxilinxopencl.so).
@@ -266,21 +263,29 @@ python36 benchmarks.py
 
 Benchmark parameters:
 ```bash
-usage: benchmarks.py [-h] [--num_rounds NUM_ROUNDS] [--datasets DATASETS]
-                     [--verbosity VERBOSITY] [--nthreads NTHREADS]
+usage: benchmarks.py [-h] [-r ROUNDS] [-d DATASETS] [-v VERBOSITY]
+                     [-t NTHREADS] [-R NREQUESTS]
+                     [-f NFEATURES [NFEATURES ...]] [-D DEPTH]
 
 optional arguments:
   -h, --help            show this help message and exit
-  --num_rounds NUM_ROUNDS
+  -r ROUNDS, --rounds ROUNDS
                         Boosting rounds. (default: 5)
-  --datasets DATASETS   Datasets to run. Must be included in the Default
-                        (default:
-                        Cifar10,MNIST,Higgs,YearPredictionMSD,Synthetic,Cover
-                        Type,Airline)
-  --verbosity VERBOSITY
+  -d DATASETS, --datasets DATASETS
+                        Datasets to run. Must be included in the Default
+                        (default: Cifar10,SVHN,SyntheticR,SyntheticCl)
+  -v VERBOSITY, --verbosity VERBOSITY
                         XGBoost verbosity parameter. (default: 0)
-  --nthreads NTHREADS   Number of threads to use. (default: None)
-
+  -t NTHREADS, --nthreads NTHREADS
+                        Number of threads to use. (default: None)
+  -R NREQUESTS, --nrequests NREQUESTS
+                        Number of requests for Coral manager. Not used with
+                        the standalone version (default: 4)
+  -f NFEATURES [NFEATURES ...], --nfeatures NFEATURES [NFEATURES ...]
+                        Number of features for the synthetic datasets
+                        (default: 1024)
+  -D DEPTH, --depth DEPTH
+                        The maximum depth of the tree (default: 10)
 ```
 
 ## Example results
