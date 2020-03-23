@@ -4,7 +4,7 @@
          tparam_.predictor = "gpu_predictor";
        }
        break;
-+     case TreeMethod::kFPGAExact:
++    case TreeMethod::kFPGAExact:
 +      tparam_.updater_seq = "grow_fpga,prune";
 +      break;
      default:

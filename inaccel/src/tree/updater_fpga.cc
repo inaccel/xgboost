@@ -26,9 +26,7 @@ limitations under the License.
 #include "../common/timer.h"
 #include "../tree/split_evaluator.h"
 #include "../tree/param.h"
-#include <coral-api/coral.h>
-#include <coral-api/request.h>
-#include <coral-api/allocator.h>
+#include <inaccel/coral>
 
 namespace xgboost {
 namespace inaccel {
@@ -50,7 +48,7 @@ class DistFpgaMaker : public TreeUpdater {
 		spliteval_.reset(SplitEvaluator::Create(param_.split_evaluator));
 		spliteval_->Init(args);
 		is_dmat_fpga_initialized_ = false;
-		nRequests_ = 2;
+		nRequests_ = 4;
 		for(auto p : args)
 			if(p.first == "nRequests") nRequests_ = std::stoi(p.second);
 	}
@@ -488,37 +486,35 @@ class DistFpgaMaker : public TreeUpdater {
 			CHECK_LE(qexpand.size(),2048) << 
 				"More than 2048 new nodes were requested. Please reduce max depth";
 			std::vector<::inaccel::vector<SplitEntryInAccelRet>> best_split;
-			std::vector<::inaccel::Request> requests;
+			std::vector<::inaccel::session> sessions;
 			best_split.resize(nRequests_);
 			for(uint32_t req = 0; req<nRequests_; req++)
 			{
 				best_split[req].resize(qexpand_size_alligned);
 				uint32_t ncols_req = req_cols[req+1] - req_cols[req];
-				::inaccel::Request request{"com.inaccel.xgboost.exact"};
-				request.Arg((int)nrows_);
-				request.Arg((int)ncols_req);
-				request.Arg((int)qexpand.size());
-				request.Arg((int)max_rows_);
-				request.Arg(gpair_fpga);
-				request.Arg(position_fpga_);
-				request.Arg(dmat_fpga[req]);
-				request.Arg(feat_valid_fpga_[req]);
-				request.Arg(snode_stats_);
-				request.Arg(snode_rg_);
-				request.Arg(best_split[req]);
-				request.Arg(param_.min_child_weight);
-				request.Arg(param_.max_delta_step);
-				request.Arg(param_.reg_alpha);
-				request.Arg(param_.reg_lambda);
-				requests.push_back(request);
+				unsigned node_num = qexpand.size();
+				::inaccel::request exact{"com.inaccel.xgboost.exact"};
+				exact.arg(nrows_);
+				exact.arg(ncols_req);
+				exact.arg(node_num);
+				exact.arg(max_rows_);
+				exact.arg(gpair_fpga);
+				exact.arg(position_fpga_);
+				exact.arg(dmat_fpga[req]);
+				exact.arg(feat_valid_fpga_[req]);
+				exact.arg(snode_stats_);
+				exact.arg(snode_rg_);
+				exact.arg(best_split[req]);
+				exact.arg(param_.min_child_weight);
+				exact.arg(param_.max_delta_step);
+				exact.arg(param_.reg_alpha);
+				exact.arg(param_.reg_lambda);
+
+				sessions.push_back(::inaccel::submit(exact));
 			}
 			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				::inaccel::Coral::SubmitAsync(requests[req]);
-			}
-			for(uint32_t req = 0; req<nRequests_; req++)
-			{
-				::inaccel::Coral::Await(requests[req]);
+				::inaccel::wait(sessions[req]);
 			}
 			this->SyncBestSolution(qexpand, best_split, req_cols);
 			for (int nid : qexpand) {

@@ -13,7 +13,7 @@
          .add_enum("hist",      TreeMethod::kHist)
          .add_enum("gpu_exact", TreeMethod::kGPUExact)
          .add_enum("gpu_hist",  TreeMethod::kGPUHist)
-+        .add_enum("fpga_exact",  TreeMethod::kFPGAExact)
++        .add_enum("fpga_exact",TreeMethod::kFPGAExact)
          .describe("Choice of tree construction method.");
    }
  };
