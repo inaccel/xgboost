@@ -1,9 +1,9 @@
 --- xgboost
 +++ inaccel-xgboost
-@@ -132,6 +132,9 @@
-         tparam_.predictor = "gpu_predictor";
-       }
+@@ -175,6 +175,9 @@
+       tparam_.updater_seq = "grow_gpu_hist";
        break;
+     }
 +    case TreeMethod::kFPGAExact:
 +      tparam_.updater_seq = "grow_fpga,prune";
 +      break;

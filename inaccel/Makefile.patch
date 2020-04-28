@@ -1,11 +1,11 @@
 --- xgboost
 +++ inaccel-xgboost
-@@ -67,7 +67,7 @@
- endif
- endif
-
--export LDFLAGS= -pthread -lm $(ADD_LDFLAGS) $(DMLC_LDFLAGS) $(PLUGIN_LDFLAGS)
-+export LDFLAGS= -pthread -lm $(ADD_LDFLAGS) $(DMLC_LDFLAGS) $(PLUGIN_LDFLAGS) -lcoral-api
- export CFLAGS= -DDMLC_LOG_CUSTOMIZE=1 -std=c++11 -Wall -Wno-unknown-pragmas -Iinclude $(ADD_CFLAGS) $(PLUGIN_CFLAGS)
- CFLAGS += -I$(DMLC_CORE)/include -I$(RABIT)/include -I$(GTEST_PATH)/include
- #java include path
+@@ -127,7 +127,7 @@
+ SRC = $(wildcard src/*.cc src/*/*.cc)
+ ALL_OBJ = $(patsubst src/%.cc, build/%.o, $(SRC))
+ AMALGA_OBJ = amalgamation/xgboost-all0.o
+-LIB_DEP = $(DMLC_CORE)/libdmlc.a $(RABIT)/lib/$(LIB_RABIT)
++LIB_DEP = $(DMLC_CORE)/libdmlc.a $(RABIT)/lib/$(LIB_RABIT) inaccel/libcoral-api.a
+ ALL_DEP = $(filter-out build/cli_main.o, $(ALL_OBJ)) $(LIB_DEP)
+ CLI_OBJ = build/cli_main.o
+ include tests/cpp/xgboost_test.mk

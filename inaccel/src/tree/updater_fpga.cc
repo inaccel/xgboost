@@ -15,18 +15,19 @@ limitations under the License.
 */
 
 #include <rabit/rabit.h>
-#include <xgboost/tree_updater.h>
 #include <memory>
 #include <vector>
 #include <cmath>
 #include <algorithm>
 
+#include "inaccel/coral"
+#include "param.h"
+#include "split_evaluator.h"
+#include "xgboost/json.h"
+#include "xgboost/tree_updater.h"
 #include "../common/random.h"
 #include "../common/bitmap.h"
 #include "../common/timer.h"
-#include "../tree/split_evaluator.h"
-#include "../tree/param.h"
-#include <inaccel/coral>
 
 namespace xgboost {
 namespace inaccel {
@@ -46,11 +47,19 @@ class DistFpgaMaker : public TreeUpdater {
 		pruner_.reset(TreeUpdater::Create("prune", tparam_));
 		pruner_->Configure(args);
 		spliteval_.reset(SplitEvaluator::Create(param_.split_evaluator));
-		spliteval_->Init(args);
+		spliteval_->Init(&param_);
 		is_dmat_fpga_initialized_ = false;
 		nRequests_ = 4;
 		for(auto p : args)
 			if(p.first == "nRequests") nRequests_ = std::stoi(p.second);
+	}
+	void LoadConfig(Json const& in) override {
+		auto const& config = get<Object const>(in);
+		fromJson(config.at("train_param"), &this->param_);
+	}
+	void SaveConfig(Json* p_out) const override {
+		auto& out = *p_out;
+		out["train_param"] = toJson(param_);
 	}
 	char const* Name() const override {
 		return "grow_fpga";
@@ -64,7 +73,7 @@ class DistFpgaMaker : public TreeUpdater {
 		if (is_dmat_fpga_initialized_ == false) {
 			monitor_.Start("Init dmat_fpga");
 			max_rows_ = 0;
-			for (const auto &batch : dmat->GetSortedColumnBatches()) {
+			for (const auto &batch : dmat->GetBatches<SortedCSCPage>()) {
 				for (uint32_t cidx = 0; cidx < ncol; cidx++) {
 					auto col = batch[cidx];
 					auto rows = static_cast<uint32_t>(col.size());
@@ -87,7 +96,7 @@ class DistFpgaMaker : public TreeUpdater {
 				auto ncol_mlt = ncol_req/8 + ((ncol_req%8)>0?1:0);
 				dmat_fpga_[req].resize(ncol_mlt*nrow_mlt);
 				std::fill(dmat_fpga_[req].begin(),dmat_fpga_[req].end(),invalid);
-				for (const auto &batch : dmat->GetSortedColumnBatches()) {
+				for (const auto &batch : dmat->GetBatches<SortedCSCPage>()) {
 					#pragma omp parallel for schedule(static)
 					for (uint32_t cidx = req_cols_[req]; cidx < req_cols_[req+1]; cidx++) {
 						auto col = batch[cidx];
@@ -337,19 +346,10 @@ class DistFpgaMaker : public TreeUpdater {
 		}
 		inline void InitData(const std::vector<GradientPair>& gpair, const DMatrix& fmat,
 							 const RegTree& tree) {
-			CHECK_EQ(tree.param.num_nodes, tree.param.num_roots) << "FpgaMaker: can only grow new tree";
-			const std::vector<unsigned>& root_index = fmat.Info().root_index_;
 			// setup position
 			position_.resize(gpair.size());
 			CHECK_EQ(nrows_, position_.size());
-			if (root_index.size() == 0) {
-				std::fill(position_.begin(), position_.end(), 0);
-			} else {
-				for (size_t ridx = 0; ridx <	position_.size(); ++ridx) {
-					position_[ridx] = root_index[ridx];
-					CHECK_LT(root_index[ridx], (unsigned)tree.param.num_roots);
-				}
-			}
+			std::fill(position_.begin(), position_.end(), 0);
 			// mark delete for the deleted datas
 			for (size_t ridx = 0; ridx < position_.size(); ++ridx) {
 				if (gpair[ridx].GetHess() < 0.0f) position_[ridx] = ~position_[ridx];
@@ -375,9 +375,7 @@ class DistFpgaMaker : public TreeUpdater {
 			snode_.reserve(256);
 			// expand query
 			qexpand_.reserve(256); qexpand_.clear();
-			for (int i = 0; i < tree.param.num_roots; ++i) {
-				qexpand_.push_back(i);
-			}
+			qexpand_.push_back(0);
 			feat_valid_fpga_.resize(nRequests_);
 		}
 		inline void InitNewNode(const std::vector<int>& qexpand,
@@ -483,7 +481,7 @@ class DistFpgaMaker : public TreeUpdater {
 								const std::vector<uint32_t> &req_cols,
 								RegTree *p_tree) {
 			size_t qexpand_size_alligned = qexpand.size() + (qexpand.size()%2);
-			CHECK_LE(qexpand.size(),2048) << 
+			CHECK_LE(qexpand.size(),2048) <<
 				"More than 2048 new nodes were requested. Please reduce max depth";
 			std::vector<::inaccel::vector<SplitEntryInAccelRet>> best_split;
 			std::vector<::inaccel::session> sessions;
@@ -529,7 +527,7 @@ class DistFpgaMaker : public TreeUpdater {
 					p_tree->ExpandNode(nid, e.best.SplitIndex(), e.best.split_value,
 														 e.best.DefaultLeft(), e.weight, left_leaf_weight,
 														 right_leaf_weight, e.best.loss_chg,
-														 e.stats.sum_hess);
+														 e.stats.sum_hess, 0);
 				} else {
 					(*p_tree)[nid].SetLeaf(e.weight * param_.learning_rate);
 				}
@@ -604,7 +602,7 @@ class DistFpgaMaker : public TreeUpdater {
 						boolmap_[j] = 0;
 				}
 			}
-			for (const auto &batch : p_fmat->GetSortedColumnBatches()) {
+			for (const auto &batch : p_fmat->GetBatches<SortedCSCPage>()) {
 				for (auto fid : fsplits) {
 					auto col = batch[fid];
 					const auto ndata = static_cast<uint32_t>(col.size());
