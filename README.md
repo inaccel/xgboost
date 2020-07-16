@@ -15,7 +15,7 @@ source aws-fpga/vitis_setup.sh
 ```sh
 sudo yum install -y centos-release-scl
 sudo yum-config-manager --enable rhel-server-rhscl-7-rpms
-sudo yum install -y devtoolset-6
+sudo yum install -y devtoolset-7
 ```
 
 ## Install Docker
@@ -39,8 +39,8 @@ sudo systemctl start docker
 
 ```sh
 sudo yum remove -y git
-sudo yum install -y https://centos7.iuscommunity.org/ius-release.rpm
-sudo yum install -y git2u-all
+sudo yum -y install https://packages.endpoint.com/rhel/7/os/x86_64/endpoint-repo-1.8-1.x86_64.rpm
+sudo yum install -y git
 ```
 
 ## Install InAccel & C++ Coral API
