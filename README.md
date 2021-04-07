@@ -46,20 +46,16 @@ sudo yum install -y git
 ## Install InAccel & C++ Coral API
 
 ```sh
-curl -sS https://setup.inaccel.com/repo | sh
-sudo yum install -y inaccel coral-api
-sudo systemctl restart docker
+curl -sS https://setup.inaccel.com/repository | sh -s install
+sudo yum install -y coral-api
+sudo systemctl start inaccel
+sudo systemctl enable inaccel
 ```
 
-### Config InAccel Coral license (https://inaccel.com/license)
-```sh
-inaccel config license ...
-```
-
-### Start InAccel Coral
+### Start InAccel Coral providing a valid license (https://inaccel.com/license)
 
 ```sh
-inaccel coral start --fpgas=xilinx
+docker inaccel up --env license=<license_key>
 ```
 
 ## Clone inaccel/xgboost

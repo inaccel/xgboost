@@ -484,7 +484,7 @@ class DistFpgaMaker : public TreeUpdater {
 			CHECK_LE(qexpand.size(),2048) <<
 				"More than 2048 new nodes were requested. Please reduce max depth";
 			std::vector<::inaccel::vector<SplitEntryInAccelRet>> best_split;
-			std::vector<::inaccel::session> sessions;
+			std::vector<std::future<void>> responses;
 			best_split.resize(nRequests_);
 			for(uint32_t req = 0; req<nRequests_; req++)
 			{
@@ -508,11 +508,11 @@ class DistFpgaMaker : public TreeUpdater {
 				exact.arg(param_.reg_alpha);
 				exact.arg(param_.reg_lambda);
 
-				sessions.push_back(::inaccel::submit(exact));
+				responses.push_back(::inaccel::submit(exact));
 			}
 			for(uint32_t req = 0; req<nRequests_; req++)
 			{
-				::inaccel::wait(sessions[req]);
+				responses[req].get();
 			}
 			this->SyncBestSolution(qexpand, best_split, req_cols);
 			for (int nid : qexpand) {
