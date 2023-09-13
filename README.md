@@ -401,3 +401,14 @@ python36 benchmarks.py -d SyntheticCl -f 64 128 256 512 1024 2048
 |          |   fpga  |  23.554 |  0.8572  | 4.21    |
 |   2048   |   cpu   | 196.171 |  0.8518  |         |
 |          |   fpga  |  43.064 |  0.8508  | 4.56    |
+
+
+
+## Acknowledgments
+
+This project has received funding from the European Union Horizon 2020 Research and Innovation program under grant agreement No. 871643 MORPHEMIC. 
+
+For more information please check: [MORPHEMIC](https://www.morphemic.cloud/)
+
+
+
